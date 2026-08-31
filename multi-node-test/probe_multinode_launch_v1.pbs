@@ -6,19 +6,20 @@
 # Assumptions: the approved container and required modules exist on GAAS.
 # This probe only observes the launch setup; it does not run HPL-MxP.
 
-#PBS -N HPL_MXP_MULTINODE_PROBE_V1
+#PBS -N HPL_MXP_MULTINODE_PROBE_V2
 #PBS -q gpu_as
 #PBS -P hpc_admin
 #PBS -l select=2:ngpus=4
+#PBS -l place=scatter
 #PBS -l walltime=00:15:00
-#PBS -o outputs/probe_multinode_launch_v1.o
-#PBS -e outputs/probe_multinode_launch_v1.e
+#PBS -o outputs/probe_multinode_launch_v2.o
+#PBS -e outputs/probe_multinode_launch_v2.e
 
 set -euo pipefail
 
 cd "$PBS_O_WORKDIR"
 
-echo "probe=probe_multinode_launch_v1"
+echo "probe=probe_multinode_launch_v2"
 echo "pbs_job_id=${PBS_JOBID:-unknown}"
 echo "workdir=$PWD"
 date --iso-8601=seconds
