@@ -1,0 +1,85 @@
+#!/bin/bash
+# Diagnostic: cross-node MPI *data* transport probe for GAAS HPL-MxP.
+# Expected working directory: multi-node-test/ on GAAS.
+# Inputs: PBS select=2:ngpus=2 (place=scatter). Outputs: outputs/.
+# Purpose: the multi-node LAUNCH (rank spawn via pbsdsh) is confirmed working,
+# but the HPL-MxP run hangs at cross-node MPI communication. This probe isolates
+# WHERE it hangs: MPI_Init (PMIx/ORTE handshake) vs first collective, and reports
+# the UCX transports + InfiniBand devices the container can see on compute nodes.
+
+#PBS -N HPL_MXP_MPI_PROBE
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l place=scatter
+#PBS -l walltime=00:05:00
+
+set -uo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+module purge
+module load apptainer/1.4.1
+module load nvhpc/26.3
+module load squashfuse/0.5.2
+module load gocryptfs/2.5.0
+
+chmod +x "$PWD/rsh_pbsdsh.sh"
+
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+RSH_AGENT="$PWD/rsh_pbsdsh.sh"
+
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+GPUS=2
+NPROCS=$((NNODES * GPUS))
+
+awk -v g="$GPUS" '
+  { sub(/\r$/, ""); if (!seen[$0]++) print $0 " slots=" g }
+' "$PBS_NODEFILE" > "$PWD/hostfile"
+
+echo "=== compile tiny MPI allreduce test inside container ==="
+cat > "$PWD/mpi_test.c" <<'EOF'
+#include <mpi.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+  int rank, size, x;
+  MPI_Init(&argc, &argv);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  fprintf(stderr, "RANK %d/%d: after MPI_Init\n", rank, size);
+  fflush(stderr);
+  x = rank;
+  MPI_Allreduce(MPI_IN_PLACE, &x, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  fprintf(stderr, "RANK %d/%d: allreduce done sum=%d (expect %d)\n",
+          rank, size, x, (size * (size - 1)) / 2);
+  fflush(stderr);
+  MPI_Finalize();
+  return 0;
+}
+EOF
+apptainer exec "$SIF" /opt/hpcx/ompi/bin/mpicc -o "$PWD/mpi_test" "$PWD/mpi_test.c"
+echo "compiled: $PWD/mpi_test"
+
+echo "=== per-rank container UCX + IB detection ==="
+mpirun -np "$NPROCS" \
+  --hostfile "$PWD/hostfile" \
+  --mca plm_rsh_agent "$RSH_AGENT" \
+  --mca plm_rsh_no_tree_spawn 1 \
+  --mca plm_rsh_num_concurrent 1 \
+  --mca routed direct \
+  -x PATH -x LD_LIBRARY_PATH \
+  --bind-to none \
+  apptainer exec --nv "$SIF" bash -c \
+    'echo "--- rank=$OMPI_COMM_WORLD_RANK host=$(hostname) ---"; ucx_info -d 2>/dev/null | grep -iE "Transport:|Device:|Device over|^#"; echo "[ibv]"; ibv_devinfo 2>/dev/null | grep -iE "hca_id|transport|port|state" | head -8'
+
+echo "=== minimal cross-node MPI allreduce (inside container) ==="
+mpirun -np "$NPROCS" \
+  --hostfile "$PWD/hostfile" \
+  --mca plm_rsh_agent "$RSH_AGENT" \
+  --mca plm_rsh_no_tree_spawn 1 \
+  --mca plm_rsh_num_concurrent 1 \
+  --mca routed direct \
+  -x PATH -x LD_LIBRARY_PATH \
+  --bind-to none \
+  apptainer exec --nv "$SIF" "$PWD/mpi_test"
+
+echo "=== probe complete ==="
