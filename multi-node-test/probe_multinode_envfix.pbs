@@ -1,0 +1,66 @@
+#!/bin/bash
+# Diagnostic v2: test the env-propagation hypothesis for the cross-node
+# MPI_Init hang. The working launch passes `-x PATH -x LD_LIBRARY_PATH` to let
+# the *host* apptainer mount the encrypted SIF, but that same LD_LIBRARY_PATH
+# bleeds into the container and can make the app resolve the HOST libmpi instead
+# of the container's. This probe (a) shows what LD_LIBRARY_PATH and libmpi the
+# container app actually uses, and (b) retries the allreduce with PATH only.
+
+#PBS -N HPL_MXP_ENVFIX
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l place=scatter
+#PBS -l walltime=00:06:00
+
+set -uo pipefail
+cd "$PBS_O_WORKDIR"
+
+module purge
+module load apptainer/1.4.1
+module load nvhpc/26.3
+module load squashfuse/0.5.2
+module load gocryptfs/2.5.0
+chmod +x "$PWD/rsh_pbsdsh.sh"
+
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+RSH_AGENT="$PWD/rsh_pbsdsh.sh"
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+GPUS=2
+NPROCS=$((NNODES * GPUS))
+awk -v g="$GPUS" '{ sub(/\r$/,""); if (!seen[$0]++) print $0 " slots=" g }' "$PBS_NODEFILE" > "$PWD/hostfile"
+
+echo "=== (re)compile mpi_test ==="
+cat > "$PWD/mpi_test.c" <<'EOF'
+#include <mpi.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+  int rank, size, x;
+  MPI_Init(&argc, &argv);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  fprintf(stderr, "RANK %d/%d after MPI_Init\n", rank, size); fflush(stderr);
+  x = rank;
+  MPI_Allreduce(MPI_IN_PLACE, &x, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  fprintf(stderr, "RANK %d/%d allreduce sum=%d expect=%d\n", rank, size, x, (size*(size-1))/2); fflush(stderr);
+  MPI_Finalize();
+  return 0;
+}
+EOF
+apptainer exec "$SIF" /opt/hpcx/ompi/bin/mpicc -o "$PWD/mpi_test" "$PWD/mpi_test.c"
+echo "compiled"
+
+echo "=== inspect container env + libmpi resolution (rank 0) ==="
+mpirun -np "$NPROCS" --hostfile "$PWD/hostfile" \
+  --mca plm_rsh_agent "$RSH_AGENT" --mca plm_rsh_no_tree_spawn 1 --mca plm_rsh_num_concurrent 1 --mca routed direct \
+  -x PATH -x LD_LIBRARY_PATH --bind-to none \
+  apptainer exec --nv "$SIF" bash -c \
+    'if [ "$OMPI_COMM_WORLD_RANK" = "0" ]; then echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"; echo "-- ldd --"; ldd "$(pwd)/mpi_test" 2>&1 | grep -iE "mpi|ucp|uct" ; fi'
+
+echo "=== test A: allreduce with -x PATH only (no -x LD_LIBRARY_PATH) ==="
+timeout 60 mpirun -np "$NPROCS" --hostfile "$PWD/hostfile" \
+  --mca plm_rsh_agent "$RSH_AGENT" --mca plm_rsh_no_tree_spawn 1 --mca plm_rsh_num_concurrent 1 --mca routed direct \
+  -x PATH --bind-to none \
+  apptainer exec --nv "$SIF" "$PWD/mpi_test"
+echo "test A exit=$?"
+
+echo "=== probe complete ==="
