@@ -1,0 +1,68 @@
+#!/bin/bash
+# Probe the GAAS multi-node (2 nodes x 4 GPUs) container launch path.
+# Expected working directory: multi-node-test/ on GAAS.
+# Inputs: PBS select=2:ngpus=4 allocation. Outputs: attempt-specific PBS
+# stdout/stderr under outputs/.
+# Assumptions: the approved container and required modules exist on GAAS.
+# This probe only observes the launch setup; it does not run HPL-MxP.
+
+#PBS -N HPL_MXP_MULTINODE_PROBE_V1
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l select=2:ngpus=4
+#PBS -l walltime=00:15:00
+#PBS -o outputs/probe_multinode_launch_v1.o
+#PBS -e outputs/probe_multinode_launch_v1.e
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+echo "probe=probe_multinode_launch_v1"
+echo "pbs_job_id=${PBS_JOBID:-unknown}"
+echo "workdir=$PWD"
+date --iso-8601=seconds
+echo "mother_superior_host=$(hostname)"
+
+# Load the same minimal environment used by the single-node baseline/run jobs.
+module purge
+module load apptainer/1.4.1
+module load nvhpc/26.3
+module load squashfuse/0.5.2
+module load gocryptfs/2.5.0
+
+echo "=== PBS_NODEFILE ==="
+cat "$PBS_NODEFILE"
+
+echo "=== pbs_remsh / pbsdsh availability (host) ==="
+ls -l /opt/pbs/bin/pbs_remsh /opt/pbs/bin/pbsdsh 2>&1
+
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+
+echo "=== stage 0: host mpirun cross-node spawn (expect 2 hosts x 4 ranks) ==="
+mpirun -np 8 \
+  --hostfile "$PBS_NODEFILE" \
+  --map-by ppr:4:node \
+  --mca plm_rsh_agent /opt/pbs/bin/pbs_remsh \
+  --bind-to none \
+  hostname
+
+echo "=== stage 1: container mpirun cross-node spawn (bind /opt/pbs) ==="
+apptainer exec --nv -B /opt/pbs "$SIF" \
+  mpirun -np 8 \
+    --hostfile "$PBS_NODEFILE" \
+    --map-by ppr:4:node \
+    --mca plm_rsh_agent /opt/pbs/bin/pbs_remsh \
+    --bind-to none \
+    hostname
+
+echo "=== stage 2: per-rank host + GPU list (expect rank -> local GPU 0..3 per node) ==="
+apptainer exec --nv -B /opt/pbs "$SIF" \
+  mpirun -np 8 \
+    --hostfile "$PBS_NODEFILE" \
+    --map-by ppr:4:node \
+    --mca plm_rsh_agent /opt/pbs/bin/pbs_remsh \
+    --bind-to none \
+    bash -c 'echo "rank=$OMPI_COMM_WORLD_RANK host=$(hostname)"; nvidia-smi -L'
+
+echo "=== probe complete ==="
