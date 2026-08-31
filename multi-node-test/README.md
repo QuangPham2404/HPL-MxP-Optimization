@@ -1,74 +1,62 @@
 # Multi-node Test
 
-## Purpose
+Validating and documenting the GAAS multi-node HPL-MxP launch path.
 
-Validate the GAAS multi-node HPL-MxP launch path: 2 compute nodes, 4 GPUs
-each, 8 MPI ranks total (4 per node). This directory holds the cross-node
-launcher probe before any real HPL-MxP multi-node baseline is run.
+## Status: validated
 
-## Desired resource mapping
+The cross-node launch mechanism is **working** and has been verified with a
+full scaling sweep (2/3 nodes × 1/2/4 GPUs). See
+[`GAAS_MULTINODE_SETUP.md`](GAAS_MULTINODE_SETUP.md) for the explanation of
+what breaks on GAAS, the fixes, and a walkthrough example.
 
-- PBS allocation: `select=2:ngpus=4` (2 chunks x 4 GPUs = 2 distinct nodes).
-- Launcher: Open MPI `-np 8 --map-by ppr:4:node` via the container.
-- Cross-node spawn agent: PBS Pro `pbs_remsh` (`/opt/pbs/bin/pbs_remsh`),
-  since the GAAS Open MPI (host and container) is built without the `tm`
-  component (only `rsh`/`slurm`/`isolated`) and there is no `pbs_tmrsh`.
-- Explicit `--hostfile "$PBS_NODEFILE"` required because there is no
-  `ras: tm` auto-detection.
-- Per-node GPU affinity: `--gpu-affinity 0:1:2:3` (local indices).
+## What works
 
-## Attempts and results
+| item | result |
+|---|---|
+| Distinct-node placement | `place=scatter` is required |
+| Cross-node transport | `pbsdsh` via the `rsh_pbsdsh.sh` bridge (SSH/rsh/`pbs_tmrsh` all unavailable) |
+| Launch model | host `mpirun` → `apptainer exec --nv` per rank |
+| Env to remote ranks | `-x PATH -x LD_LIBRARY_PATH` (for squashfuse/gocryptfs SIF mount) |
+| Rank mapping | de-duplicated hostfile with explicit `slots=G` |
 
-| Attempt | PBS job | Outcome |
+## Scaling sweep results (all passed)
+
+Submitted sequentially (see `run_scaling_sweep_seq.sh`). Each node gets exactly
+`G` ranks with local ranks 0..G-1.
+
+| config | ranks | verified |
 |---|---|---|
-| `probe_multinode_launch_v1` | `55456.gaas` | FAILED — both chunks landed on the same node |
-| `probe_multinode_launch_v2` | not submitted | pending |
+| 2 × 1 GPU | 2 | ✅ |
+| 2 × 2 GPUs | 4 | ✅ |
+| 2 × 4 GPUs | 8 | ✅ |
+| 3 × 1 GPU | 3 | ✅ |
+| 3 × 2 GPUs | 6 | ✅ |
+| 3 × 4 GPUs | 12 | ✅ |
 
-## Error record — attempt v1
+## Key files
 
-`select=2:ngpus=4` did **not** produce two distinct nodes. The job's
-`PBS_NODEFILE` contained the same host twice:
+- `rsh_pbsdsh.sh` — the `plm_rsh_agent` bridge (hostname → vnode → `pbsdsh -n`).
+- `probe_scaling.pbs` — parametrized launch-validation probe (any N×G).
+- `run_scaling_sweep.sh` — submits the 6-config sweep concurrently.
+- `run_scaling_sweep_seq.sh` — submits sequentially (reliable; use this one).
 
-```text
-=== PBS_NODEFILE ===
-hpc-gaas-g16
-hpc-gaas-g16
-```
+## Milestones
 
-Both 4-GPU chunks were packed onto a single 8-GPU node (`hpc-gaas-g16`).
-Stage 0 (host `mpirun -np 8 --map-by ppr:4:node`) then failed because Open MPI
-deduplicated the hostfile to one node and reported:
+1. **v1** — `select=2:ngpus=4` packed both chunks onto one 8-GPU node
+   (`place=scatter` missing). Fixed by adding `place=scatter`.
+2. **v2** — discovered the transport gap: no `tm` PLM, no `rsh`, no
+   `pbs_tmrsh`, and inter-node SSH is blocked. `pbsdsh` is the only working
+   cross-node transport.
+3. **v3/v4** — built `rsh_pbsdsh.sh`; host `mpirun` + `apptainer exec` model
+   works end-to-end (per-rank GPU visibility verified).
+4. **v5/scale** — fixed remote SIF mount (`-x PATH -x LD_LIBRARY_PATH`), and
+   rank mapping (de-dup hostfile with `slots=G`, `no_tree_spawn` +
+   `routed direct`). Full 6-config sweep passes when submitted sequentially.
 
-```text
-There are not enough slots available in the system to satisfy the 4
-slots that were requested by the application:
-  hostname
-```
+## Known caveats
 
-### Suspected cause
-
-GAAS nodes expose 8 GPUs each. `select=2:ngpus=4` alone lets the scheduler
-satisfy both 4-GPU chunks on one 8-GPU node, so no distinct-node separation
-is enforced.
-
-### Planned fix
-
-Add a scatter placement directive to force chunks onto separate physical
-nodes:
-
-```text
-#PBS -l select=2:ngpus=4
-#PBS -l place=scatter
-```
-
-This is staged in `probe_multinode_launch_v1.pbs` as attempt `_v2` (new
-`-o`/`-e` names), committed but **not yet submitted**.
-
-## Next action (next session)
-
-1. Submit `probe_multinode_launch_v1.pbs` (attempt `_v2`) and verify
-   `PBS_NODEFILE` now lists two distinct nodes.
-2. Confirm stage 0/1 cross-node spawn and stage 2 per-rank GPU visibility.
-3. If `place=scatter` is insufficient or unsupported, investigate explicit
-   node chunking (e.g. `select=1:ngpus=4+1:ngpus=4` or hostname-specific
-   constraints) as the follow-up.
+- Do **not** set `mpiprocs` in `select` (it breaks `pbsdsh -n` vnode indexing).
+- Submitting many multi-node jobs at once can race
+  ("No nodes available" / "all nodes ... filled"); submit sequentially.
+- Harmless `WARNING: group: unknown groupid 1304617061` from Apptainer
+  (unmapped GID in the container).

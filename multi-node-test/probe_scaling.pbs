@@ -1,0 +1,69 @@
+#!/bin/bash
+# Generic multi-node launch validation probe for GAAS HPL-MxP.
+# Layout is derived from the allocation. Submit with -v "LABEL=2x4,GPUS=4",
+# using select=N:ngpus=G (no mpiprocs/ncpus; see run_scaling_sweep.sh).
+
+#PBS -N HPL_MXP_SCALE_PROBE
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l place=scatter
+#PBS -l walltime=00:15:00
+
+set -euo pipefail
+
+cd "$PBS_O_WORKDIR"
+
+LABEL="${LABEL:-unknown}"
+GPUS="${GPUS:-}"
+
+module purge
+module load apptainer/1.4.1
+module load nvhpc/26.3
+module load squashfuse/0.5.2
+module load gocryptfs/2.5.0
+
+chmod +x "$PWD/rsh_pbsdsh.sh"
+
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+if [ -n "$GPUS" ]; then
+  NPROCS=$((NNODES * GPUS))
+  GPUS_PER_NODE=$GPUS
+else
+  NPROCS=$(wc -l < "$PBS_NODEFILE")
+  GPUS_PER_NODE=$((NPROCS / NNODES))
+fi
+
+echo "label=${LABEL}"
+echo "pbs_job_id=${PBS_JOBID:-unknown}"
+echo "mother_superior=$(hostname)"
+echo "layout=${NNODES}nodes x ${GPUS_PER_NODE}gpius = ${NPROCS} ranks"
+echo "nodes=$(sort -u "$PBS_NODEFILE" | paste -sd' ')"
+echo "=== PBS_NODEFILE (${NNODES} lines) ==="
+cat "$PBS_NODEFILE"
+
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+RSH_AGENT="$PWD/rsh_pbsdsh.sh"
+
+# De-duplicate node list and annotate explicit per-node slot counts. Using
+# "host slots=G" with default slot mapping is robust for any G (ppr:N:node is
+# unreliable for small N).
+awk -v g="$GPUS_PER_NODE" '
+  { sub(/\r$/, ""); if (!seen[$0]++) print $0 " slots=" g }
+' "$PBS_NODEFILE" > "$PWD/hostfile"
+
+echo "=== hostfile (${NNODES} nodes, ${GPUS_PER_NODE} slots each) ==="
+cat "$PWD/hostfile"
+
+echo "=== per-rank host + localrank + GPU list (inside container) ==="
+mpirun -np "$NPROCS" \
+  --hostfile "$PWD/hostfile" \
+  --mca plm_rsh_agent "$RSH_AGENT" \
+  --mca plm_rsh_no_tree_spawn 1 \
+  --mca plm_rsh_num_concurrent 1 \
+  --mca routed direct \
+  -x PATH -x LD_LIBRARY_PATH \
+  --bind-to none \
+  apptainer exec --nv "$SIF" \
+    bash -c 'echo "rank=$OMPI_COMM_WORLD_RANK host=$(hostname) localrank=$OMPI_COMM_WORLD_LOCAL_RANK"; nvidia-smi -L'
+
+echo "=== probe complete label=${LABEL} ==="
