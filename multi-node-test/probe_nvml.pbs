@@ -45,6 +45,7 @@ apptainer exec --nv \
     --mca plm_rsh_no_tree_spawn 1 \
     --mca plm_rsh_num_concurrent 1 \
     --mca routed direct \
+    -x PATH -x LD_LIBRARY_PATH \
     --bind-to none \
     bash "$PWD/nvml_probe.sh"
 
