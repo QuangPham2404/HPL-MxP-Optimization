@@ -1,0 +1,62 @@
+#!/bin/bash
+# Approach 1 end-to-end test: container's OWN mpirun drives cross-node spawn via
+# rsh_pbsdsh_container.sh (remote orted launched inside the container). Runs a
+# minimal cross-node MPI_Allreduce to verify MPI_Init completes.
+
+#PBS -N HPL_MXP_A1_MPI
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l place=scatter
+#PBS -l walltime=00:08:00
+
+cd "$PBS_O_WORKDIR"
+set -uo pipefail
+
+module purge
+module load apptainer/1.4.1 nvhpc/26.3 squashfuse/0.5.2 gocryptfs/2.5.0
+
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+chmod +x "$PWD/rsh_pbsdsh_container.sh"
+
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+GPUS=2
+NPROCS=$((NNODES * GPUS))
+awk -v g="$GPUS" '{ sub(/\r$/,""); if (!seen[$0]++) print $0 " slots=" g }' "$PBS_NODEFILE" > "$PWD/hostfile"
+
+echo "=== compile mpi_test ==="
+cat > "$PWD/mpi_test.c" <<'EOF'
+#include <mpi.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+  int rank, size, x;
+  MPI_Init(&argc, &argv);
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  fprintf(stderr, "RANK %d/%d after MPI_Init\n", rank, size); fflush(stderr);
+  x = rank;
+  MPI_Allreduce(MPI_IN_PLACE, &x, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  fprintf(stderr, "RANK %d/%d allreduce sum=%d expect=%d\n", rank, size, x, (size*(size-1))/2); fflush(stderr);
+  MPI_Finalize();
+  return 0;
+}
+EOF
+apptainer exec "$SIF" /opt/hpcx/ompi/bin/mpicc -o "$PWD/mpi_test" "$PWD/mpi_test.c"
+echo "compiled"
+
+echo "=== approach 1: container mpirun + container orted bridge ==="
+mkdir -p /tmp/a1
+apptainer exec --nv \
+  -B /opt/pbs:/opt/pbs \
+  -B /var/spool/pbs:/var/spool/pbs \
+  -B "$PWD":"$PWD" \
+  "$SIF" \
+  /usr/local/mpi/bin/mpirun -np "$NPROCS" \
+    --hostfile "$PWD/hostfile" \
+    --mca plm_rsh_agent "$PWD/rsh_pbsdsh_container.sh" \
+    --mca plm_rsh_no_tree_spawn 1 \
+    --mca plm_rsh_num_concurrent 1 \
+    --mca routed direct \
+    --bind-to none \
+    "$PWD/mpi_test"
+
+echo "=== probe complete (exit=$?) ==="
