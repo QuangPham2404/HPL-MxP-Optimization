@@ -1,12 +1,13 @@
 #!/bin/bash
 # HPL-MxP multinode baseline run, parametrized by GPU count per node.
-# Expected working directory: multi-node-test/ on GAAS (contains rsh_pbsdsh.sh).
+# Expected working directory: multi-node-test/ on GAAS (contains rsh_pbsdsh_container.sh).
 # Inputs: PBS select=N:ngpus=G (place=scatter) plus qsub -v "LABEL=..,GPUS=..".
 # Outputs: attempt-specific PBS stdout/stderr under outputs/ (passed via qsub).
-# Assumptions: the approved container + modules exist; rsh_pbsdsh.sh is present.
+# Assumptions: the approved container + modules exist; rsh_pbsdsh_container.sh is present.
 #
 # This script runs the same HPL-MxP baseline parameters on any N x G layout.
 # It only validates the multi-node launch/transport; performance is not the goal.
+# Launch model: Approach 1 (container mpirun + rsh_pbsdsh_container.sh bridge).
 
 #PBS -N HPL_MXP_MULTINODE
 #PBS -q gpu_as
@@ -35,10 +36,10 @@ module load nvhpc/26.3
 module load squashfuse/0.5.2
 module load gocryptfs/2.5.0
 
-chmod +x "$PWD/rsh_pbsdsh.sh"
+chmod +x "$PWD/rsh_pbsdsh_container.sh"
 
 SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
-RSH_AGENT="$PWD/rsh_pbsdsh.sh"
+RSH_AGENT="$PWD/rsh_pbsdsh_container.sh"
 
 # Allocation geometry: one rank per GPU, G ranks per node.
 NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
@@ -72,27 +73,32 @@ echo "gpu_affinity=${GPU_AFFINITY}"
 echo "=== hostfile ==="
 cat "$PWD/hostfile"
 
-# Host HPC-X mpirun drives cross-node spawn via the pbsdsh bridge; each rank
-# execs the container and runs /workspace/hpl-mxp.sh as the MPI program.
-mpirun -np "$NPROCS" \
-  --hostfile "$PWD/hostfile" \
-  --mca plm_rsh_agent "$RSH_AGENT" \
-  --mca plm_rsh_no_tree_spawn 1 \
-  --mca plm_rsh_num_concurrent 1 \
-  --mca routed direct \
-  -x PATH -x LD_LIBRARY_PATH \
-  --bind-to none \
-  apptainer exec --nv "$SIF" /workspace/hpl-mxp.sh \
-    --gpu-affinity "$GPU_AFFINITY" \
-    --nprow "$NPROW" \
-    --npcol "$NPCOL" \
-    --nporder "$NPORDER" \
-    --n "$N" \
-    --nb "$NB" \
-    --skip-tests 1 \
-    --monitor-gpu 1 \
-    --monitor-gpu-interval 10 \
-    --monitor-gpu-pcie-width-warning 16 \
-    --monitor-gpu-pcie-gen-warning 5
+# Container's own mpirun drives the cross-node spawn via the pbsdsh bridge that
+# launches the remote orted inside the container (Approach 1, consistent MPI
+# end-to-end). Bind /opt/pbs + /var/spool/pbs so pbsdsh works inside the container.
+apptainer exec --nv \
+  -B /opt/pbs:/opt/pbs \
+  -B /var/spool/pbs:/var/spool/pbs \
+  -B "$PWD":"$PWD" \
+  "$SIF" \
+  /usr/local/mpi/bin/mpirun -np "$NPROCS" \
+    --hostfile "$PWD/hostfile" \
+    --mca plm_rsh_agent "$RSH_AGENT" \
+    --mca plm_rsh_no_tree_spawn 1 \
+    --mca plm_rsh_num_concurrent 1 \
+    --mca routed direct \
+    --bind-to none \
+    /workspace/hpl-mxp.sh \
+      --gpu-affinity "$GPU_AFFINITY" \
+      --nprow "$NPROW" \
+      --npcol "$NPCOL" \
+      --nporder "$NPORDER" \
+      --n "$N" \
+      --nb "$NB" \
+      --skip-tests 1 \
+      --monitor-gpu 1 \
+      --monitor-gpu-interval 10 \
+      --monitor-gpu-pcie-width-warning 16 \
+      --monitor-gpu-pcie-gen-warning 5
 
 echo "=== HPL-MxP multinode baseline complete: ${LABEL} ==="
