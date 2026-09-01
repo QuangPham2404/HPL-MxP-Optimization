@@ -44,7 +44,8 @@ PRE="export PATH=/usr/local/apptainer/1.4.1/bin:/usr/local/squashfuse/0.5.2/bin:
 
 echo "rsh_pbsdsh_container: HOST=$HOST idx=$idx cmd=[$cmd]" >&2
 
-# Run the env-prefixed orted command *inside* the container via apptainer,
-# evaluated by the container shell so the env prefix applies to orted.
+# Run the env-prefixed orted command *inside* the container via apptainer.
+# The command is single-quoted (it contains no single quotes itself) so its
+# embedded double-quotes / parentheses survive the two shell layers intact.
 exec /opt/pbs/bin/pbsdsh -n "$idx" -o -- sh -c \
-  "${PRE} ${APPT} exec --nv ${SIF} bash -c \"${cmd}\""
+  "${PRE} ${APPT} exec --nv ${SIF} bash -c '${cmd}'"
