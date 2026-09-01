@@ -1,0 +1,51 @@
+#!/bin/bash
+# Diagnose libnvidia-ml.so.1 availability inside the Approach-1 container on
+# both local and remote ranks. Mirrors the exact mpirun + bridge of the baseline.
+
+#PBS -N HPL_MXP_NVML_PROBE
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l place=scatter
+#PBS -l walltime=00:08:00
+
+cd "$PBS_O_WORKDIR"
+set -uo pipefail
+
+module purge
+module load apptainer/1.4.1 nvhpc/26.3 squashfuse/0.5.2 gocryptfs/2.5.0
+
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+chmod +x "$PWD/rsh_pbsdsh_container.sh"
+
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+GPUS=2
+NPROCS=$((NNODES * GPUS))
+awk -v g="$GPUS" '{ sub(/\r$/,""); if (!seen[$0]++) print $0 " slots=" g }' "$PBS_NODEFILE" > "$PWD/hostfile"
+
+cat > "$PWD/nvml_probe.sh" <<'EOF'
+#!/bin/bash
+echo "RANK=$OMPI_COMM_WORLD_RANK LOCAL_RANK=$OMPI_COMM_WORLD_LOCAL_RANK host=$(hostname)"
+echo "  LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<empty>}"
+echo "  NV_LIBRARY_PATH=${NV_LIBRARY_PATH:-<unset>} SINGULARITY_LD_LIBRARY_PATH=${SINGULARITY_LD_LIBRARY_PATH:-<unset>}"
+echo "  nvidia-smi:"; nvidia-smi -L 2>&1 | head -1
+echo "  find libnvidia-ml:"; find / -name 'libnvidia-ml.so.1' 2>/dev/null
+echo "  ldd xhpl_mxp nvidia lines:"; ldd /workspace/hpl-mxp-linux-x86_64/xhpl_mxp 2>&1 | grep -iE 'nvidia|not found'
+echo "----"
+EOF
+chmod +x "$PWD/nvml_probe.sh"
+
+apptainer exec --nv \
+  -B /opt/pbs:/opt/pbs \
+  -B /var/spool/pbs:/var/spool/pbs \
+  -B "$PWD":"$PWD" \
+  "$SIF" \
+  /usr/local/mpi/bin/mpirun -np "$NPROCS" \
+    --hostfile "$PWD/hostfile" \
+    --mca plm_rsh_agent "$PWD/rsh_pbsdsh_container.sh" \
+    --mca plm_rsh_no_tree_spawn 1 \
+    --mca plm_rsh_num_concurrent 1 \
+    --mca routed direct \
+    --bind-to none \
+    bash "$PWD/nvml_probe.sh"
+
+echo "=== nvml probe complete (exit=$?) ==="
