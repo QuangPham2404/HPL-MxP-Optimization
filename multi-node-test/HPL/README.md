@@ -60,7 +60,7 @@ modprobe nvidia_peermem
 
 Until the admin loads it, only the 1x4 (single-node) HPL baseline can run.
 
-## Non-root workaround (under investigation)
+## Non-root workaround (CONFIRMED, but slow)
 
 HPL-NVIDIA exposes runtime switches to bypass NVSHMEM (from the container
 `TUNING` doc):
@@ -71,48 +71,47 @@ HPL-NVIDIA exposes runtime switches to bypass NVSHMEM (from the container
 | `HPL_FCT_COMM_POLICY` | `0` (NVSHMEM pivoting) | `1` → Host MPI pivoting |
 | `HPL_P2P_AS_BCAST` | `1` (ncclSend/Recv) | `0` ncclBcast, `2` CUDA-aware MPI, `3` MPI, `4` NVSHMEM |
 
-`run_hpl_baseline.pbs` now defaults to `HPL_USE_NVSHMEM=0` +
-`HPL_FCT_COMM_POLICY=1` (exported to ranks via `-x`), which should avoid the
+`run_hpl_baseline.pbs` defaults to `HPL_USE_NVSHMEM=0` +
+`HPL_FCT_COMM_POLICY=1` (exported to ranks via `-x`), which **avoids** the
 `nvidia_peermem` requirement by using NCCL/MPI instead of NVSHMEM.
+
+**Confirmed:** this ran HPL 2x4 to completion without `nvidia_peermem` (job
+`55928`), but at a large performance cost — the cross-node data plane falls back
+to host-staged transfers instead of GPUDirect RDMA:
+
+| run | backend | N | Time | Gflops |
+|---|---|---|---|---|
+| 1x4 (single node) | NVSHMEM (default) | 200704 | ~28 s | 1.89e+05 |
+| 2x4 (2 nodes) | NVSHMEM (default) | 200704 | — | fails (nv_peer_mem) |
+| 2x4 (2 nodes) | NCCL/MPI (`HPL_USE_NVSHMEM=0`) | 200704 | 1157 s | 4.66e+03 |
+
+So the non-root path is correct but ~40× slower — acceptable only as a
+functional baseline, not for performance. Loading `nvidia_peermem` (root) is the
+proper fix for real HPL-NVIDIA multi-node performance.
 
 ---
 
 ## ⚠️ SESSION HAND-OFF (read this first)
 
-### What is complete
+### Status table
 
 | benchmark | 1x4 | 2x4 | 3x4 |
 |---|---|---|---|
 | HPL-MxP (`../HPL-MxP/`) | ✅ PASSED | ✅ PASSED | ✅ PASSED |
 | HPCG (`../HPCG/`) | ✅ VALID | ✅ VALID | ✅ VALID |
-| HPL | ✅ PASSED (1.89e+05 Gflops) | ⛔ see below | not run |
+| HPL | ✅ PASSED (NVSHMEM, 1.89e5) | ✅ PASSED (NCCL/MPI, 4.66e3) | ⏳ in-flight (`55943`) |
 
 HPL launch setup (Approach 1) is correct — see the `nvidia_peermem` blocker above.
 
-### In-flight work (do NOT assume it finished)
+### In-flight work
 
-A **non-root workaround test** for HPL 2x4 was submitted but its outcome is
-**undetermined** at hand-off time:
+HPL **3x4** (non-root backend, `HPL_USE_NVSHMEM=0`) is job `55943.gaas`
+(`outputs/hpl_3x4_nosh.o/.e`). It will be slow (~20+ min) for the same reason as
+2x4. Poll `qstat 55943`, then record the `Gflops` line when done.
 
-- Job `55928.gaas` (`outputs/hpl_2x4_nosh.o/.e`), `HPL_USE_NVSHMEM=0`
-  + `HPL_FCT_COMM_POLICY=1`.
-- As of hand-off it had been `R` for **~8 min with NO output files created**
-  (not even the `module load` line in `.e`). This is abnormal: either the
-  NCCL/MPI fallback is hanging during cross-node setup, or it is merely very
-  slow. **The next agent must check `qstat 55928` / `outputs/hpl_2x4_nosh.{o,e}`
-  first.**
+### Notes for whoever continues
 
-### Next steps
-
-1. Check job `55928` and `outputs/hpl_2x4_nosh.{o,e}`:
-   - If it **PASSED** → the non-root workaround works; run `3x4`
-     (`qsub -v LABEL=3x4 -l select=3:ngpus=4`), then record results.
-   - If it **hung/failed** → NCCL-over-IB likely also needs GPUDirect (or the
-     MPI fallback is unusably slow/hanging). Investigate `HPL_P2P_AS_BCAST=2/3`
-     and CUDA-aware-MPI/NCCL `NCCL_*` env vars, or fall back to requesting
-     `nvidia_peermem` from the admin. **Do not delete** the `nvidia_peermem`
-     note above — it is the root-cause record for the senior engineer.
-2. Preserve attempt-specific `.o/.e` evidence (do not overwrite `hpl_2x4.o/.e`
-   = original NVSHMEM-failure evidence; `hpl_1x4.o/.e` = PASSED).
-3. `run_hpl_baseline.pbs` currently has `HPL_USE_NVSHMEM=0` as the default; if
-   admin loads `nvidia_peermem`, revert default to `1` for the fast NVSHMEM path.
+- Evidence preserved: `hpl_1x4.{o,e}` (NVSHMEM PASSED), `hpl_2x4.{o,e}`
+  (original NVSHMEM failure), `hpl_2x4_nosh.{o,e}` (NCCL/MPI PASSED).
+- `run_hpl_baseline.pbs` defaults to `HPL_USE_NVSHMEM=0`; if the admin loads
+  `nvidia_peermem`, revert the default to `1` for the fast NVSHMEM path.
