@@ -1,0 +1,84 @@
+#!/bin/bash
+# HPL-MxP multi-node baseline (1x4 / 2x4 / 3x4) using the validated
+# Approach-1 launch (container mpirun + rsh_pbsdsh_container.sh bridge).
+#
+# Submit from this directory (multi-node-test/HPL-MxP), e.g.:
+#   qsub -v LABEL=2x4 -l select=2:ngpus=4 run_hplmxp_baseline.pbs
+#
+# Shared setup details: ../GAAS_MULTINODE_SETUP.md
+
+#PBS -N HPL_MXP_MULTINODE
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l place=scatter
+#PBS -l walltime=00:30:00
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+mkdir -p "$PWD/outputs"
+
+LABEL="${LABEL:-unknown}"
+GPUS=4                                   # GPUs (and ranks) per node
+N=120000
+NB=1024
+NPORDER=row
+
+ROOT_DIR="$(dirname "$PBS_O_WORKDIR")"
+BRIDGE="$ROOT_DIR/rsh_pbsdsh_container.sh"
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+
+module purge
+module load apptainer/1.4.1 nvhpc/26.3 squashfuse/0.5.2 gocryptfs/2.5.0
+chmod +x "$BRIDGE"
+
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+NPROCS=$((NNODES * GPUS))
+
+# Process grid nprow x npcol = NPROCS, npcol >= nprow (square-ish).
+NPCOL=$(awk -v r="$NPROCS" 'BEGIN { n=int(sqrt(r)); if (n*n<r) n++; for (c=n; c<=r; c++) if (r%c==0) { print c; exit } }')
+NPROW=$((NPROCS / NPCOL))
+
+GPU_AFFINITY=$(seq -s: 0 $((GPUS - 1)))
+
+# De-duplicated hostfile with explicit per-node slot count.
+awk -v g="$GPUS" '{ sub(/\r$/,""); if (!seen[$0]++) print $0 " slots=" g }' \
+  "$PBS_NODEFILE" > "$PWD/hostfile"
+
+echo "experiment_id=hplmxp-multinode-baseline"
+echo "attempt=${LABEL}"
+echo "pbs_job_id=${PBS_JOBID:-unknown}"
+echo "layout=${NNODES} nodes x ${GPUS} GPUs = ${NPROCS} ranks"
+echo "grid=nprow=${NPROW} npcol=${NPCOL} order=${NPORDER}"
+echo "n=${N} nb=${NB}"
+echo "nodes=$(sort -u "$PBS_NODEFILE" | paste -sd' ')"
+echo "gpu_affinity=${GPU_AFFINITY}"
+echo "=== hostfile ==="
+cat "$PWD/hostfile"
+
+apptainer exec --nv \
+  -B /opt/pbs:/opt/pbs \
+  -B /var/spool/pbs:/var/spool/pbs \
+  -B "$ROOT_DIR":"$ROOT_DIR" \
+  "$SIF" \
+  /usr/local/mpi/bin/mpirun -np "$NPROCS" \
+    --hostfile "$PWD/hostfile" \
+    --mca plm_rsh_agent "$BRIDGE" \
+    --mca plm_rsh_no_tree_spawn 1 \
+    --mca plm_rsh_num_concurrent 1 \
+    --mca routed direct \
+    -x PATH -x LD_LIBRARY_PATH \
+    --bind-to none \
+    /workspace/hpl-mxp.sh \
+      --gpu-affinity "$GPU_AFFINITY" \
+      --nprow "$NPROW" \
+      --npcol "$NPCOL" \
+      --nporder "$NPORDER" \
+      --n "$N" \
+      --nb "$NB" \
+      --skip-tests 1 \
+      --monitor-gpu 1 \
+      --monitor-gpu-interval 10 \
+      --monitor-gpu-pcie-width-warning 16 \
+      --monitor-gpu-pcie-gen-warning 5
+
+echo "=== HPL-MxP multinode baseline complete: ${LABEL} ==="

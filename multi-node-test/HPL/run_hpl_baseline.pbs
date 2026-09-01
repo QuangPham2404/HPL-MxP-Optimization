@@ -1,0 +1,108 @@
+#!/bin/bash
+# HPL-NVIDIA multi-node baseline (1x4 / 2x4 / 3x4) using the validated
+# Approach-1 launch (container mpirun + rsh_pbsdsh_container.sh bridge).
+#
+# Submit from this directory (multi-node-test/HPL), e.g.:
+#   qsub -v LABEL=2x4 -l select=2:ngpus=4 run_hpl_baseline.pbs
+#
+# Shared setup details: ../GAAS_MULTINODE_SETUP.md
+
+#PBS -N HPL_MULTINODE
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l place=scatter
+#PBS -l walltime=00:30:00
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+mkdir -p "$PWD/outputs"
+
+LABEL="${LABEL:-unknown}"
+GPUS=4                                   # GPUs (and ranks) per node
+N=200704                                 # generic problem size (aligned to NB)
+NB=1024
+
+ROOT_DIR="$(dirname "$PBS_O_WORKDIR")"
+BRIDGE="$ROOT_DIR/rsh_pbsdsh_container.sh"
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+
+module purge
+module load apptainer/1.4.1 nvhpc/26.3 squashfuse/0.5.2 gocryptfs/2.5.0
+chmod +x "$BRIDGE"
+
+NNODES=$(sort -u "$PBS_NODEFILE" | wc -l)
+NPROCS=$((NNODES * GPUS))
+
+# Process grid P x Q = NPROCS, Q >= P (square-ish).
+NPCOL=$(awk -v r="$NPROCS" 'BEGIN { n=int(sqrt(r)); if (n*n<r) n++; for (c=n; c<=r; c++) if (r%c==0) { print c; exit } }')
+NPROW=$((NPROCS / NPCOL))
+
+# Generate HPL.dat (standard Netlib HPL input; see sample-dat/ in the container).
+cat > "$PWD/HPL.dat" <<EOF
+HPLinpack benchmark input file
+Innovative Computing Laboratory, University of Tennessee
+HPL.out      output file name (if any)
+6            device out (6=stdout,7=stderr,file)
+1            # of problems sizes (N)
+$N           Ns
+1            # of NBs
+$NB          NBs
+1            PMAP process mapping (0=Row-,1=Column-major)
+1            # of process grids (P x Q)
+$NPROW       Ps
+$NPCOL       Qs
+16.0         threshold
+1            # of panel fact
+0 1 2        PFACTs (0=left, 1=Crout, 2=Right)
+1            # of recursive stopping criterium
+2 8          NBMINs (>= 1)
+1            # of panels in recursion
+2            NDIVs
+1            # of recursive panel fact.
+0 1 2        RFACTs (0=left, 1=Crout, 2=Right)
+1            # of broadcast
+3 2          BCASTs (0=1rg,1=1rM,2=2rg,3=2rM,4=Lng,5=LnM)
+1            # of lookahead depth
+1 0          DEPTHs (>=0)
+1            SWAP (0=bin-exch,1=long,2=mix)
+192          swapping threshold
+1            L1 in (0=transposed,1=no-transposed) form
+0            U  in (0=transposed,1=no-transposed) form
+0            Equilibration (0=no,1=yes)
+8            memory alignment in double (> 0)
+EOF
+
+GPU_AFFINITY=$(seq -s: 0 $((GPUS - 1)))
+
+# De-duplicated hostfile with explicit per-node slot count.
+awk -v g="$GPUS" '{ sub(/\r$/,""); if (!seen[$0]++) print $0 " slots=" g }' \
+  "$PBS_NODEFILE" > "$PWD/hostfile"
+
+echo "experiment_id=hpl-multinode-baseline"
+echo "attempt=${LABEL}"
+echo "pbs_job_id=${PBS_JOBID:-unknown}"
+echo "layout=${NNODES} nodes x ${GPUS} GPUs = ${NPROCS} ranks"
+echo "grid=P=${NPROW} Q=${NPCOL} N=${N} NB=${NB}"
+echo "nodes=$(sort -u "$PBS_NODEFILE" | paste -sd' ')"
+echo "gpu_affinity=${GPU_AFFINITY}"
+echo "=== hostfile ==="
+cat "$PWD/hostfile"
+
+apptainer exec --nv \
+  -B /opt/pbs:/opt/pbs \
+  -B /var/spool/pbs:/var/spool/pbs \
+  -B "$ROOT_DIR":"$ROOT_DIR" \
+  "$SIF" \
+  /usr/local/mpi/bin/mpirun -np "$NPROCS" \
+    --hostfile "$PWD/hostfile" \
+    --mca plm_rsh_agent "$BRIDGE" \
+    --mca plm_rsh_no_tree_spawn 1 \
+    --mca plm_rsh_num_concurrent 1 \
+    --mca routed direct \
+    -x PATH -x LD_LIBRARY_PATH \
+    --bind-to none \
+    /workspace/hpl.sh \
+      --dat "$PWD/HPL.dat" \
+      --gpu-affinity "$GPU_AFFINITY"
+
+echo "=== HPL multinode baseline complete: ${LABEL} ==="
