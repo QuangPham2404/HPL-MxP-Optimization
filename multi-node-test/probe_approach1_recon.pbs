@@ -1,0 +1,50 @@
+#!/bin/bash
+# Approach-1 recon: can the HOST pbsdsh be used from INSIDE the container to
+# reach a remote compute node? This is the prerequisite for running the
+# container's own mpirun (consistent MPI) with a pbsdsh-based orted bridge.
+
+#PBS -N HPL_MXP_A1_RECON
+#PBS -q gpu_as
+#PBS -P hpc_admin
+#PBS -l place=scatter
+#PBS -l walltime=00:08:00
+
+cd "$PBS_O_WORKDIR"
+set -uo pipefail
+
+module purge
+module load apptainer/1.4.1 nvhpc/26.3 squashfuse/0.5.2 gocryptfs/2.5.0
+
+SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
+
+echo "=== stage 0: host context ==="
+echo "PBS_JOBID=$PBS_JOBID"
+echo "PBS_NODEFILE=$PBS_NODEFILE"
+echo "nodefile content:"; cat "$PBS_NODEFILE"
+echo "spool:"; ls -ld /var/spool/pbs /var/spool/pbs/aux 2>&1
+echo "spool aux jobid:"; ls -la "/var/spool/pbs/aux/$PBS_JOBID" 2>&1 | head
+
+echo "=== stage 1: pbsdsh from inside container (bind /opt/pbs + /var/spool/pbs) ==="
+apptainer exec --nv \
+  -B /opt/pbs:/opt/pbs \
+  -B /var/spool/pbs:/var/spool/pbs \
+  "$SIF" \
+  bash -c '
+    echo "inside PBS_JOBID=$PBS_JOBID PBS_NODEFILE=$PBS_NODEFILE"
+    echo "--- cat nodefile in container ---"; cat "$PBS_NODEFILE" 2>&1
+    echo "--- pbsdsh -n 0 hostname ---"; /opt/pbs/bin/pbsdsh -n 0 -o -- hostname 2>&1; echo "exit0=$?"
+    echo "--- pbsdsh -n 1 hostname ---"; /opt/pbs/bin/pbsdsh -n 1 -o -- hostname 2>&1; echo "exit1=$?"
+  '
+
+echo "=== stage 2: can container pbsdsh launch remote apptainer (mount SIF) ==="
+apptainer exec --nv \
+  -B /opt/pbs:/opt/pbs \
+  -B /var/spool/pbs:/var/spool/pbs \
+  "$SIF" \
+  bash -c '
+    idx=1
+    /opt/pbs/bin/pbsdsh -n "$idx" -o -- sh -c \
+      "export PATH=/usr/local/apptainer/1.4.1/bin:/usr/local/squashfuse/0.5.2/bin:/usr/local/gocryptfs/2.5.0/bin:\$PATH LD_LIBRARY_PATH=/usr/local/squashfuse/0.5.2/lib:\$LD_LIBRARY_PATH; echo remote_host=\$(hostname); apptainer exec --nv /home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif bash -c \"echo inside_container_host=\$(hostname)\""
+  '
+
+echo "=== probe complete ==="
