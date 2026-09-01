@@ -11,6 +11,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Attempt tag: distinguishes this sweep's outputs from earlier attempts so the
+# old run evidence (e.g. the pre-fix hung hplmxp_mn_2x2.o) is not overwritten.
+TAG="${TAG:-a2}"
+
 CONFIGS=(
   "2x1:2:1"
   "2x2:2:2"
@@ -27,9 +31,9 @@ for cfg in "${CONFIGS[@]}"; do
   label="${cfg%%:*}"; rest="${cfg#*:}"
   nnodes="${rest%%:*}"; gpus="${rest##*:}"
 
-  jobid=$(qsub -v "LABEL=$label,GPUS=$gpus" -N "HPL_MXP_MN_${label}" \
+  jobid=$(qsub -v "LABEL=${label}_${TAG},GPUS=$gpus" -N "HPL_MXP_MN_${label}_${TAG}" \
     -l "select=${nnodes}:ngpus=${gpus}" \
-    -o "outputs/hplmxp_mn_${label}.o" -e "outputs/hplmxp_mn_${label}.e" \
+    -o "outputs/hplmxp_mn_${label}_${TAG}.o" -e "outputs/hplmxp_mn_${label}_${TAG}.e" \
     run_hplmxp_multinode_baseline.pbs)
   echo "[$(date -Is)] submitted ${label} -> ${jobid}"
 

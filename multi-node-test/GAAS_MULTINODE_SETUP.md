@@ -113,7 +113,13 @@ exec /opt/pbs/bin/pbsdsh -n "$idx" -o -- sh -c "$cmd"
 
 This is the key file: `multi-node-test/rsh_pbsdsh.sh`.
 
-### 2.3 Host `mpirun` drives; the container runs per rank
+### 2.3 Host `mpirun` drives; the container runs per rank — **SUPERSEDED**
+
+> **Deprecated.** This host-`mpirun` form validated only rank *spawn*, not MPI
+> communication. It hung in `MPI_Init` for real HPL runs because the host
+> `mpirun` (host HPC-X 2.25.1 OpenMPI) drove a container MPI app (container
+> HPC-X at `/opt/hpcx`) — same version, different build, so the cross-node
+> ORTE/PMIx handshake never completed. Use **Approach 1** instead (see below).
 
 Do **not** run `mpirun` inside the container for multi-node. Instead, use the
 **host** HPC-X `mpirun` and make each MPI rank run `apptainer exec --nv <sif>`:
@@ -122,9 +128,7 @@ Do **not** run `mpirun` inside the container for multi-node. Instead, use the
 mpirun ... apptainer exec --nv "$SIF" /workspace/hpl-mxp.sh ...
 ```
 
-This sidesteps the "container orted on remote host" problem entirely: cross-node
-daemon spawn happens on the host, and each rank's workload executes in the
-container.
+(This form was superseded because it could not complete cross-node MPI.)
 
 ### 2.4 Propagate module env with `-x PATH -x LD_LIBRARY_PATH`
 

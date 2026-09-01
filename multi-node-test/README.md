@@ -55,6 +55,7 @@ apptainer exec --nv \
     --mca plm_rsh_no_tree_spawn 1 \
     --mca plm_rsh_num_concurrent 1 \
     --mca routed direct \
+    -x PATH -x LD_LIBRARY_PATH \
     --bind-to none \
     "$PWD/my_mpi_app"
 ```
@@ -127,3 +128,7 @@ The full HPL-MxP sweep still needs to be re-run under Approach 1.
 - Approach 1 requires the file mode of `rsh_pbsdsh*.sh` to stay `0755` in git
   (a local `chmod +x` on GAAS otherwise shows up as an uncommitted change and
   blocks `git pull --ff-only`).
+- `-x PATH -x LD_LIBRARY_PATH` is **required** so the container's `--nv`
+  `/.singularity.d/libs` (and thus `libnvidia-ml.so.1`, needed by `xhpl_mxp`,
+  and `libcuda.so.1`) propagate to remote ranks. Without it, remote ranks fail
+  to load the NVML library even though the SIF is mounted.
