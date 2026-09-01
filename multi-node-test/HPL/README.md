@@ -99,19 +99,24 @@ proper fix for real HPL-NVIDIA multi-node performance.
 |---|---|---|---|
 | HPL-MxP (`../HPL-MxP/`) | ✅ PASSED | ✅ PASSED | ✅ PASSED |
 | HPCG (`../HPCG/`) | ✅ VALID | ✅ VALID | ✅ VALID |
-| HPL | ✅ PASSED (NVSHMEM, 1.89e5) | ✅ PASSED (NCCL/MPI, 4.66e3) | ⏳ in-flight (`55943`) |
+| HPL | ✅ PASSED (NVSHMEM, 1.89e5) | ✅ PASSED (NCCL/MPI, 4.66e3) | ⛔ killed at walltime (NCCL/MPI too slow) |
 
 HPL launch setup (Approach 1) is correct — see the `nvidia_peermem` blocker above.
 
-### In-flight work
+### HPL 3x4 outcome (non-root backend)
 
-HPL **3x4** (non-root backend, `HPL_USE_NVSHMEM=0`) is job `55943.gaas`
-(`outputs/hpl_3x4_nosh.o/.e`). It will be slow (~20+ min) for the same reason as
-2x4. Poll `qstat 55943`, then record the `Gflops` line when done.
+Job `55943.gaas` was **killed at the 30-min walltime**
+(`PBS: job killed: walltime 1816 exceeded limit 1800`). The launch itself worked
+(the bridge spawned `orted` on all 3 nodes), but the `HPL_USE_NVSHMEM=0`
+host-staged fallback is too slow to finish `N=200704` on 12 ranks within the
+walltime. This confirms the non-root workaround is functional only for small
+node counts (`2x4` finished in ~19 min; `3x4` > 30 min).
 
 ### Notes for whoever continues
 
 - Evidence preserved: `hpl_1x4.{o,e}` (NVSHMEM PASSED), `hpl_2x4.{o,e}`
-  (original NVSHMEM failure), `hpl_2x4_nosh.{o,e}` (NCCL/MPI PASSED).
+  (original NVSHMEM failure), `hpl_2x4_nosh.{o,e}` (NCCL/MPI PASSED),
+  `hpl_3x4_nosh.{o,e}` (NCCL/MPI killed at walltime).
 - `run_hpl_baseline.pbs` defaults to `HPL_USE_NVSHMEM=0`; if the admin loads
-  `nvidia_peermem`, revert the default to `1` for the fast NVSHMEM path.
+  `nvidia_peermem`, revert the default to `1` for the fast NVSHMEM path. That
+  is the real fix for HPL multi-node performance.
