@@ -35,6 +35,11 @@ fi
 
 cmd=""
 for a in "$@"; do
+  # Drop --daemonize: orted must stay in the foreground of "apptainer exec" so
+  # the ephemeral container stays mounted (a daemonized orted would outlive the
+  # exec and hit a Bus error when the squashfuse mount is torn down). pbsdsh -o
+  # already detaches, so daemonization is unnecessary here.
+  [ "$a" = "--daemonize" ] && continue
   cmd="${cmd} ${a}"
 done
 
