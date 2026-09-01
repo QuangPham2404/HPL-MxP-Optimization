@@ -2,46 +2,48 @@
 
 ## Case `mn-2026-09-01-mpi-init-hang`
 
-- **Status:** OPEN (USER_ACTION_REQUIRED)
+- **Status:** RESOLVED
 - **Affected workflow:** HPL-MxP multi-node baseline (`multi-node-test/`).
 - **Date / job IDs:** 2026-09-01. Jobs `55767.gaas` (HPL 2x2), `55768.gaas`
-  (mpi probe), `55770.gaas` (env-fix probe).
+  (mpi probe), `55770.gaas` (env-fix probe), `55774.gaas` (approach-1 v1),
+  `55778.gaas` (approach-1 v2), `55779.gaas` (approach-1 v3, PASSED).
 
 ### Observed error
 
-Multi-node HPL-MxP hangs with `Time Use` frozen (~10s) and no HPL output.
-A minimal 2-node `MPI_Allreduce` test (built with the container's `mpicc`)
-hangs inside `MPI_Init` — no rank prints "after MPI_Init" before walltime.
+Multi-node HPL-MxP hung with `Time Use` frozen and no HPL output. A minimal
+2-node `MPI_Allreduce` test (built with the container's `mpicc`) hung inside
+`MPI_Init`.
 
 ### Confirmed facts
 
-- Rank *spawn* across distinct nodes works (pbsdsh bridge + host `mpirun`).
-- InfiniBand is visible and ACTIVE inside the container on compute nodes
-  (UCX `rc_mlx5`/`ud_mlx5`/`dc_mlx5`, `mlx5_bond_0`, PORT_ACTIVE).
-- The container app correctly resolves its own `libmpi.so.40`
-  (`/opt/hpcx/ompi/lib`) via RPATH; `-x LD_LIBRARY_PATH` does not pollute it.
-- Host and container both report Open MPI 4.1.9a1, but are separate HPC-X builds
-  (host `/usr/local/nvhpc/.../hpcx-2.25.1`, container `/opt/hpcx`).
-- Single-node HPL (container `mpirun`, all shared-memory) works fine.
+- Rank *spawn* across distinct nodes worked (pbsdsh bridge + host `mpirun`).
+- InfiniBand was visible and ACTIVE inside the container on compute nodes.
+- The container app correctly resolved its own `libmpi.so.40` via RPATH;
+  `-x LD_LIBRARY_PATH` did not pollute it.
+- Host and container were separate Open MPI 4.1.9a1 builds (host
+  `/usr/local/nvhpc/.../hpcx-2.25.1`, container `/opt/hpcx`).
+- Single-node HPL worked (all shared-memory).
 
-### Suspected cause
+### Suspected cause → confirmed
 
-Launch model mismatch: host `mpirun` (host HPC-X) launches a container MPI
-application (container HPC-X). The container ranks' ORTE/PMIx runtime cannot
-complete the cross-node session handshake with the host `mpirun`, so `MPI_Init`
-blocks. The existing bridge was only ever validated for rank *spawn*, not MPI
-*communication*.
+Launch-model mismatch: host `mpirun` drove a container MPI app; the container
+ranks' ORTE/PMIx runtime could not complete the cross-node session with the host
+`mpirun`.
 
-### Suggested fixes (for user review — not applied)
+### Resolution (Approach 1, chosen by user)
 
-1. **Consistent container MPI (preferred):** run the container's own `mpirun`
-   (inside the container) and change the `plm_rsh_agent` bridge to launch the
-   remote `orted` *inside* the container (`apptainer exec SIF orted …`), binding
-   `$PBS_NODEFILE`/pbsdsh into the container.
-2. **Consistent host MPI:** bind-mount the host HPC-X MPI into the container and
-   make `xhpl_mxp` resolve the host's `libmpi` (consistent with host `mpirun`).
-3. Site-supported PMIx/launcher integration if available on GAAS.
+Run the container's own `mpirun` and launch the remote `orted` inside the
+container via `rsh_pbsdsh_container.sh`. Three fixes were required:
 
-### Resolution
+1. bind `/opt/pbs` + `/var/spool/pbs` into the container.
+2. single-quote the reconstructed `orted` command.
+3. strip `--daemonize` (prevents the ephemeral `apptainer exec` from unmounting
+   the SIF under the running orted).
 
-Pending.
+Verified with job `55779.gaas`: 4 ranks passed `MPI_Init` and `MPI_Allreduce`
+(`sum=6 expect=6`).
+
+### Follow-up
+
+Re-wire `run_hplmxp_multinode_baseline.pbs` to Approach 1, validate 2×2 HPL, then
+run the full sweep. See `multi-node-test/README.md` for the hand-off.
