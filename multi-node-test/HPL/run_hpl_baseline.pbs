@@ -22,6 +22,12 @@ GPUS=4                                   # GPUs (and ranks) per node
 N=200704                                 # generic problem size (aligned to NB)
 NB=1024
 
+# Inter-GPU communication backend. Default to non-NVSHMEM (NCCL/MPI) so the
+# multi-node run does NOT require the nvidia_peermem kernel module (GPUDirect
+# RDMA). Set HPL_USE_NVSHMEM=1 to use NVSHMEM instead (needs nvidia_peermem).
+export HPL_USE_NVSHMEM="${HPL_USE_NVSHMEM:-0}"
+export HPL_FCT_COMM_POLICY="${HPL_FCT_COMM_POLICY:-1}"   # 1 = Host MPI pivoting
+
 ROOT_DIR="$(dirname "$PBS_O_WORKDIR")"
 BRIDGE="$ROOT_DIR/rsh_pbsdsh_container.sh"
 SIF="/home/pham0094/hpl_hpcg_hplmxp_container/hpc-benchmarks_26.02.sif"
@@ -100,6 +106,7 @@ apptainer exec --nv \
     --mca plm_rsh_num_concurrent 1 \
     --mca routed direct \
     -x PATH -x LD_LIBRARY_PATH \
+    -x HPL_USE_NVSHMEM -x HPL_FCT_COMM_POLICY \
     --bind-to none \
     /workspace/hpl.sh \
       --dat "$PWD/HPL.dat" \
